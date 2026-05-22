@@ -332,6 +332,7 @@ export function HistoryDashboard({ vehicles, googleMapsApiKey }: HistoryDashboar
   const firstVehicle = vehicles[0];
   const [selectedVehicleId, setSelectedVehicleId] = useState(firstVehicle?.id ?? "");
   const [selectedEventId, setSelectedEventId] = useState(firstVehicle?.events[0]?.id ?? "");
+  const [isSwitchingVehicle, setIsSwitchingVehicle] = useState(false);
   const [eventFilter, setEventFilter] = useState<EventFilter>("all");
   const [fromDate, setFromDate] = useState(toDatetimeLocalValue(firstVehicle?.periodStart ?? null));
   const [toDate, setToDate] = useState(toDatetimeLocalValue(firstVehicle?.periodEnd ?? null));
@@ -395,6 +396,18 @@ export function HistoryDashboard({ vehicles, googleMapsApiKey }: HistoryDashboar
   const driveCount = filteredEvents.filter((event) => event.kind === "drive").length;
   const stopCount = filteredEvents.filter((event) => event.kind === "stop").length;
 
+  useEffect(() => {
+    if (!isSwitchingVehicle) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setIsSwitchingVehicle(false);
+    }, 250);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [isSwitchingVehicle, selectedVehicleId]);
+
   return (
     <div className="history-layout">
       <aside className="history-sidebar">
@@ -412,6 +425,7 @@ export function HistoryDashboard({ vehicles, googleMapsApiKey }: HistoryDashboar
             onChange={(event) => {
               const nextVehicleId = event.target.value;
               const nextVehicle = vehicles.find((vehicle) => vehicle.id === nextVehicleId);
+              setIsSwitchingVehicle(true);
               setSelectedVehicleId(nextVehicleId);
               setSelectedEventId(nextVehicle?.events[0]?.id ?? "");
               setFromDate(toDatetimeLocalValue(nextVehicle?.periodStart ?? null));
@@ -472,6 +486,13 @@ export function HistoryDashboard({ vehicles, googleMapsApiKey }: HistoryDashboar
 
         {selectedVehicle?.error ? <p className="vehicle-error">{selectedVehicle.error}</p> : null}
 
+        {isSwitchingVehicle ? (
+          <div className="list-loader">
+            <div className="loader-dot" />
+            <p>Cargando historial del vehiculo...</p>
+          </div>
+        ) : null}
+
         <div className="events-list">
           {filteredEvents.map((event) => {
             const isSelected = selectedEvent?.id === event.id;
@@ -517,7 +538,15 @@ export function HistoryDashboard({ vehicles, googleMapsApiKey }: HistoryDashboar
           ) : null}
         </div>
 
-        <VehicleMap apiKey={googleMapsApiKey} center={centerPoint} pathPoints={pathPoints} />
+        {isSwitchingVehicle ? (
+          <div className="map-frame">
+            <div className="map-placeholder">
+              <p>Cargando vista del vehiculo...</p>
+            </div>
+          </div>
+        ) : (
+          <VehicleMap apiKey={googleMapsApiKey} center={centerPoint} pathPoints={pathPoints} />
+        )}
 
         {selectedEvent ? (
           <div className="event-detail">
@@ -547,7 +576,12 @@ export function HistoryDashboard({ vehicles, googleMapsApiKey }: HistoryDashboar
               <strong>Ubicacion:</strong> {stripHtml(selectedEvent.locationRaw) || "-"}
             </p>
           </div>
-        ) : null}
+        ) : (
+          <div className="event-detail">
+            <h3>Detalle del evento seleccionado</h3>
+            <p>No hay eventos disponibles para este vehiculo o para el filtro aplicado.</p>
+          </div>
+        )}
       </section>
     </div>
   );

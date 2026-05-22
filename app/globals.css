@@ -189,6 +189,41 @@ body {
   padding: 0.5rem;
 }
 
+.list-loader {
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+  padding: 0.8rem;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  background: #f9fbfd;
+  color: #44556e;
+  font-size: 0.88rem;
+}
+
+.loader-dot {
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 999px;
+  background: #0e7ba3;
+  animation: pulse 0.9s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0% {
+    transform: scale(0.8);
+    opacity: 0.45;
+  }
+  50% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(0.8);
+    opacity: 0.45;
+  }
+}
+
 .history-map-panel {
   display: flex;
   flex-direction: column;
