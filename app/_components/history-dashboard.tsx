@@ -49,21 +49,25 @@ function stripHtml(value: string): string {
   return value.replace(/<[^>]*>/g, "").trim();
 }
 
-function toDatetimeLocalValue(raw: string | null): string {
-  if (!raw) return "";
+function toDateAndTimeParts(raw: string | null): { date: string; time: string } {
+  if (!raw) return { date: "", time: "" };
   const parsed = new Date(raw);
-  if (Number.isNaN(parsed.getTime())) return "";
+  if (Number.isNaN(parsed.getTime())) return { date: "", time: "" };
   const year = parsed.getFullYear();
   const month = String(parsed.getMonth() + 1).padStart(2, "0");
   const day = String(parsed.getDate()).padStart(2, "0");
   const hours = String(parsed.getHours()).padStart(2, "0");
   const minutes = String(parsed.getMinutes()).padStart(2, "0");
-  return `${year}-${month}-${day}T${hours}:${minutes}`;
+  return {
+    date: `${year}-${month}-${day}`,
+    time: `${hours}:${minutes}`,
+  };
 }
 
-function parseFilterDate(value: string): number | null {
-  if (!value) return null;
-  const timestamp = new Date(value).getTime();
+function parseFilterDateTime(date: string, time: string, fallbackTime: "start" | "end"): number | null {
+  if (!date) return null;
+  const safeTime = time || (fallbackTime === "start" ? "00:00" : "23:59");
+  const timestamp = new Date(`${date}T${safeTime}:00`).getTime();
   return Number.isNaN(timestamp) ? null : timestamp;
 }
 
@@ -334,8 +338,12 @@ export function HistoryDashboard({ vehicles, googleMapsApiKey }: HistoryDashboar
   const [selectedEventId, setSelectedEventId] = useState(firstVehicle?.events[0]?.id ?? "");
   const [isSwitchingVehicle, setIsSwitchingVehicle] = useState(false);
   const [eventFilter, setEventFilter] = useState<EventFilter>("all");
-  const [fromDate, setFromDate] = useState(toDatetimeLocalValue(firstVehicle?.periodStart ?? null));
-  const [toDate, setToDate] = useState(toDatetimeLocalValue(firstVehicle?.periodEnd ?? null));
+  const initialFrom = toDateAndTimeParts(firstVehicle?.periodStart ?? null);
+  const initialTo = toDateAndTimeParts(firstVehicle?.periodEnd ?? null);
+  const [fromDate, setFromDate] = useState(initialFrom.date);
+  const [fromTime, setFromTime] = useState(initialFrom.time);
+  const [toDate, setToDate] = useState(initialTo.date);
+  const [toTime, setToTime] = useState(initialTo.time);
 
   const selectedVehicle = useMemo(
     () => vehicles.find((vehicle) => vehicle.id === selectedVehicleId) ?? vehicles[0],
@@ -343,8 +351,8 @@ export function HistoryDashboard({ vehicles, googleMapsApiKey }: HistoryDashboar
   );
 
   const filteredEvents = useMemo(() => {
-    const fromTs = parseFilterDate(fromDate);
-    const toTs = parseFilterDate(toDate);
+    const fromTs = parseFilterDateTime(fromDate, fromTime, "start");
+    const toTs = parseFilterDateTime(toDate, toTime, "end");
 
     return (selectedVehicle?.events ?? [])
       .filter((event) => {
@@ -358,7 +366,7 @@ export function HistoryDashboard({ vehicles, googleMapsApiKey }: HistoryDashboar
         const second = b.startTimestamp ?? 0;
         return first - second;
       });
-  }, [selectedVehicle?.events, eventFilter, fromDate, toDate]);
+  }, [selectedVehicle?.events, eventFilter, fromDate, fromTime, toDate, toTime]);
 
   const selectedEvent = useMemo(
     () => filteredEvents.find((event) => event.id === selectedEventId) ?? filteredEvents[0] ?? null,
@@ -428,8 +436,12 @@ export function HistoryDashboard({ vehicles, googleMapsApiKey }: HistoryDashboar
               setIsSwitchingVehicle(true);
               setSelectedVehicleId(nextVehicleId);
               setSelectedEventId(nextVehicle?.events[0]?.id ?? "");
-              setFromDate(toDatetimeLocalValue(nextVehicle?.periodStart ?? null));
-              setToDate(toDatetimeLocalValue(nextVehicle?.periodEnd ?? null));
+              const nextFrom = toDateAndTimeParts(nextVehicle?.periodStart ?? null);
+              const nextTo = toDateAndTimeParts(nextVehicle?.periodEnd ?? null);
+              setFromDate(nextFrom.date);
+              setFromTime(nextFrom.time);
+              setToDate(nextTo.date);
+              setToTime(nextTo.time);
             }}
           >
             {vehicles.map((vehicle) => (
@@ -453,11 +465,17 @@ export function HistoryDashboard({ vehicles, googleMapsApiKey }: HistoryDashboar
             <option value="stop">Solo parada</option>
           </select>
 
-          <label htmlFor="from-date">Desde:</label>
-          <input id="from-date" type="datetime-local" value={fromDate} onChange={(event) => setFromDate(event.target.value)} />
+          <label htmlFor="from-date">Fecha desde:</label>
+          <input id="from-date" type="date" value={fromDate} onChange={(event) => setFromDate(event.target.value)} />
 
-          <label htmlFor="to-date">Hasta:</label>
-          <input id="to-date" type="datetime-local" value={toDate} onChange={(event) => setToDate(event.target.value)} />
+          <label htmlFor="from-time">Hora desde:</label>
+          <input id="from-time" type="time" value={fromTime} onChange={(event) => setFromTime(event.target.value)} />
+
+          <label htmlFor="to-date">Fecha hasta:</label>
+          <input id="to-date" type="date" value={toDate} onChange={(event) => setToDate(event.target.value)} />
+
+          <label htmlFor="to-time">Hora hasta:</label>
+          <input id="to-time" type="time" value={toTime} onChange={(event) => setToTime(event.target.value)} />
         </div>
 
         <div className="panel-block summary-grid">
