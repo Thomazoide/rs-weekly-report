@@ -1,65 +1,122 @@
-import Image from "next/image";
+import { readdir, readFile } from "node:fs/promises";
+import path from "node:path";
+import { HistoryDashboard, type VehicleEvent, type VehicleHistory } from "./_components/history-dashboard";
 
-export default function Home() {
-  return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
-    </div>
+type RawRow = {
+  group_key?: string;
+  status?: string;
+  start_at?: string;
+  end_at?: string;
+  duration?: string;
+  distance?: string;
+  speed_max?: string;
+  speed_avg?: string;
+  location?: string;
+};
+
+type RawItem = {
+  error?: string;
+  meta?: {
+    "device.name"?: {
+      value?: string;
+    };
+  };
+  table?: {
+    rows?: RawRow[];
+    totals?: {
+      start?: { value?: string };
+      end?: { value?: string };
+      distance?: { value?: string };
+      speed_max?: { value?: string };
+      speed_avg?: { value?: string };
+    };
+  };
+};
+
+function parseCoordinates(location?: string): { lat: number; lon: number } | null {
+  if (!location) {
+    return null;
+  }
+
+  const match = location.match(/q=([-0-9.]+),([-0-9.]+)/);
+  if (!match) {
+    return null;
+  }
+
+  const lat = Number(match[1]);
+  const lon = Number(match[2]);
+
+  if (Number.isNaN(lat) || Number.isNaN(lon)) {
+    return null;
+  }
+
+  return { lat, lon };
+}
+
+async function getVehicleHistories(): Promise<VehicleHistory[]> {
+  const drivesDir = path.join(process.cwd(), "drives");
+  const files = await readdir(drivesDir);
+  const jsonFiles = files.filter((fileName) => fileName.endsWith(".json"));
+
+  const vehicles = await Promise.all(
+    jsonFiles.map(async (fileName) => {
+      const absolutePath = path.join(drivesDir, fileName);
+      const rawText = await readFile(absolutePath, "utf-8");
+      const parsed = JSON.parse(rawText) as { items?: RawItem[] };
+
+      const item = parsed.items?.[0] ?? {};
+      const rows = item.table?.rows ?? [];
+      const totals = item.table?.totals;
+      const vehicleName = item.meta?.["device.name"]?.value ?? fileName.replace(".json", "");
+
+      const events: VehicleEvent[] = rows.map((row, index) => {
+        const coordinates = parseCoordinates(row.location);
+        const eventKind: VehicleEvent["kind"] = row.group_key === "drive" ? "drive" : "stop";
+
+        return {
+          id: `${fileName}-${index}`,
+          index: index + 1,
+          kind: eventKind,
+          status: row.status ?? (eventKind === "drive" ? "En movimiento" : "Detenido"),
+          startAt: row.start_at ?? "-",
+          endAt: row.end_at ?? "-",
+          startTimestamp: row.start_at ? Date.parse(row.start_at) : null,
+          endTimestamp: row.end_at ? Date.parse(row.end_at) : null,
+          duration: row.duration ?? "-",
+          distance: row.distance ?? "-",
+          speedMax: row.speed_max ?? "-",
+          speedAvg: row.speed_avg ?? "-",
+          locationRaw: row.location ?? "",
+          lat: coordinates?.lat ?? null,
+          lon: coordinates?.lon ?? null,
+          googleMapsUrl:
+            coordinates !== null
+              ? `https://www.google.com/maps?q=${coordinates.lat},${coordinates.lon}`
+              : null,
+        };
+      });
+
+      return {
+        id: fileName.replace(".json", ""),
+        fileName,
+        name: vehicleName,
+        periodStart: totals?.start?.value ?? rows[0]?.start_at ?? null,
+        periodEnd: totals?.end?.value ?? rows.at(-1)?.end_at ?? null,
+        totalDistance: totals?.distance?.value ?? null,
+        maxSpeed: totals?.speed_max?.value ?? null,
+        avgSpeed: totals?.speed_avg?.value ?? null,
+        error: item.error ?? null,
+        events,
+      } satisfies VehicleHistory;
+    }),
   );
+
+  return vehicles.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export default async function Home() {
+  const vehicles = await getVehicleHistories();
+  const googleMapsApiKey = process.env.GOOGLE_API_KEY ?? "";
+
+  return <HistoryDashboard vehicles={vehicles} googleMapsApiKey={googleMapsApiKey} />;
 }
