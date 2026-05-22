@@ -5,11 +5,14 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 type EventKind = "drive" | "stop";
 type EventFilter = "all" | EventKind;
+const ALL_VEHICLES_ID = "__all__";
 
 type MapPoint = { lat: number; lng: number };
 
 export type VehicleEvent = {
   id: string;
+  vehicleId: string;
+  vehicleName: string;
   index: number;
   kind: EventKind;
   status: string;
@@ -45,6 +48,25 @@ type HistoryDashboardProps = {
   googleMapsApiKey: string;
 };
 
+type AddressLookup = {
+  query: string;
+  token: number;
+};
+
+type AddressSearchStatus = {
+  status: "idle" | "searching" | "found" | "not_found" | "error";
+  message?: string;
+};
+
+type RoutesApiResponse = {
+  encodedPolyline?: string;
+  points?: MapPoint[];
+  warning?: {
+    code?: string;
+    message?: string;
+  };
+};
+
 function stripHtml(value: string): string {
   return value.replace(/<[^>]*>/g, "").trim();
 }
@@ -69,6 +91,14 @@ function parseFilterDateTime(date: string, time: string, fallbackTime: "start" |
   const safeTime = time || (fallbackTime === "start" ? "00:00" : "23:59");
   const timestamp = new Date(`${date}T${safeTime}:00`).getTime();
   return Number.isNaN(timestamp) ? null : timestamp;
+}
+
+function parseDistanceKilometers(value: string | null): number | null {
+  if (!value) return null;
+  const match = value.match(/[-0-9.]+/);
+  if (!match) return null;
+  const parsed = Number(match[0]);
+  return Number.isNaN(parsed) ? null : parsed;
 }
 
 function distanceSquared(a: MapPoint, b: MapPoint): number {
@@ -149,17 +179,37 @@ function decodePolyline(encoded: string): MapPoint[] {
   return points;
 }
 
+function buildPointsForRoute(events: VehicleEvent[]): MapPoint[] {
+  const drivePoints = events
+    .filter((event) => event.kind === "drive" && event.lat !== null && event.lon !== null)
+    .map((event) => ({ lat: event.lat as number, lng: event.lon as number }));
+
+  const pointsToUse =
+    drivePoints.length >= 2
+      ? drivePoints
+      : events
+          .filter((event) => event.lat !== null && event.lon !== null)
+          .map((event) => ({ lat: event.lat as number, lng: event.lon as number }));
+
+  return compactRoutePoints(pointsToUse);
+}
+
 function VehicleMap({
   apiKey,
   center,
   pathPoints,
+  addressLookup,
+  onAddressSearchStatusChange,
 }: {
   apiKey: string;
   center: MapPoint | null;
   pathPoints: MapPoint[];
+  addressLookup: AddressLookup | null;
+  onAddressSearchStatusChange: (status: AddressSearchStatus) => void;
 }) {
   const mapRef = useRef<google.maps.Map | null>(null);
   const [snappedPathBySource, setSnappedPathBySource] = useState<{ source: string; points: MapPoint[] } | null>(null);
+  const [searchedPoint, setSearchedPoint] = useState<MapPoint | null>(null);
   const { isLoaded, loadError } = useJsApiLoader({
     id: "vehicle-history-google-map",
     googleMapsApiKey: apiKey,
@@ -255,6 +305,50 @@ function VehicleMap({
       : pathPoints;
 
   useEffect(() => {
+    if (!isLoaded || !addressLookup || !addressLookup.query.trim()) {
+      return;
+    }
+
+    let cancelled = false;
+    onAddressSearchStatusChange({ status: "searching", message: "Buscando direccion..." });
+
+    const geocoder = new window.google.maps.Geocoder();
+    geocoder.geocode({ address: addressLookup.query }, (results, status) => {
+      if (cancelled) return;
+
+      if (status === "OK" && results?.[0]?.geometry?.location) {
+        const location = results[0].geometry.location;
+        const point = { lat: location.lat(), lng: location.lng() };
+        setSearchedPoint(point);
+        mapRef.current?.panTo(point);
+        mapRef.current?.setZoom(16);
+        onAddressSearchStatusChange({
+          status: "found",
+          message: results[0].formatted_address ?? "Direccion encontrada.",
+        });
+        return;
+      }
+
+      if (status === "ZERO_RESULTS") {
+        onAddressSearchStatusChange({
+          status: "not_found",
+          message: "No se encontro esa direccion.",
+        });
+        return;
+      }
+
+      onAddressSearchStatusChange({
+        status: "error",
+        message: `Error de geocodificacion: ${status}`,
+      });
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [addressLookup, isLoaded, onAddressSearchStatusChange]);
+
+  useEffect(() => {
     if (!isLoaded || !mapRef.current) {
       return;
     }
@@ -316,6 +410,19 @@ function VehicleMap({
           }}
         >
           {center ? <MarkerF position={center} /> : null}
+          {searchedPoint ? (
+            <MarkerF
+              position={searchedPoint}
+              icon={{
+                path: window.google.maps.SymbolPath.CIRCLE,
+                scale: 7,
+                fillColor: "#1e88b0",
+                fillOpacity: 1,
+                strokeColor: "#ffffff",
+                strokeWeight: 2,
+              }}
+            />
+          ) : null}
           {visiblePath.length > 1 ? (
             <PolylineF
               path={visiblePath}
@@ -344,17 +451,43 @@ export function HistoryDashboard({ vehicles, googleMapsApiKey }: HistoryDashboar
   const [fromTime, setFromTime] = useState(initialFrom.time);
   const [toDate, setToDate] = useState(initialTo.date);
   const [toTime, setToTime] = useState(initialTo.time);
+  const [addressInput, setAddressInput] = useState("");
+  const [addressLookup, setAddressLookup] = useState<AddressLookup | null>(null);
+  const [addressSearchStatus, setAddressSearchStatus] = useState<AddressSearchStatus>({ status: "idle" });
+  const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
+  const [pdfStatusMessage, setPdfStatusMessage] = useState<string | null>(null);
+
+  const overallPeriod = useMemo(() => {
+    const starts = vehicles
+      .map((vehicle) => vehicle.periodStart)
+      .filter((value): value is string => Boolean(value))
+      .map((value) => Date.parse(value))
+      .filter((value) => !Number.isNaN(value));
+    const ends = vehicles
+      .map((vehicle) => vehicle.periodEnd)
+      .filter((value): value is string => Boolean(value))
+      .map((value) => Date.parse(value))
+      .filter((value) => !Number.isNaN(value));
+
+    const minStart = starts.length ? new Date(Math.min(...starts)).toISOString() : null;
+    const maxEnd = ends.length ? new Date(Math.max(...ends)).toISOString() : null;
+
+    return { periodStart: minStart, periodEnd: maxEnd };
+  }, [vehicles]);
 
   const selectedVehicle = useMemo(
-    () => vehicles.find((vehicle) => vehicle.id === selectedVehicleId) ?? vehicles[0],
+    () => (selectedVehicleId === ALL_VEHICLES_ID ? null : vehicles.find((vehicle) => vehicle.id === selectedVehicleId) ?? vehicles[0]),
     [selectedVehicleId, vehicles],
   );
+
+  const scopedVehicles = useMemo(() => (selectedVehicle ? [selectedVehicle] : vehicles), [selectedVehicle, vehicles]);
 
   const filteredEvents = useMemo(() => {
     const fromTs = parseFilterDateTime(fromDate, fromTime, "start");
     const toTs = parseFilterDateTime(toDate, toTime, "end");
 
-    return (selectedVehicle?.events ?? [])
+    return scopedVehicles
+      .flatMap((vehicle) => vehicle.events)
       .filter((event) => {
         if (eventFilter !== "all" && event.kind !== eventFilter) return false;
         if (fromTs !== null && event.startTimestamp !== null && event.startTimestamp < fromTs) return false;
@@ -366,7 +499,21 @@ export function HistoryDashboard({ vehicles, googleMapsApiKey }: HistoryDashboar
         const second = b.startTimestamp ?? 0;
         return first - second;
       });
-  }, [selectedVehicle?.events, eventFilter, fromDate, fromTime, toDate, toTime]);
+  }, [scopedVehicles, eventFilter, fromDate, fromTime, toDate, toTime]);
+
+  const getFilteredEventsForVehicle = (vehicle: VehicleHistory): VehicleEvent[] => {
+    const fromTs = parseFilterDateTime(fromDate, fromTime, "start");
+    const toTs = parseFilterDateTime(toDate, toTime, "end");
+
+    return vehicle.events
+      .filter((event) => {
+        if (eventFilter !== "all" && event.kind !== eventFilter) return false;
+        if (fromTs !== null && event.startTimestamp !== null && event.startTimestamp < fromTs) return false;
+        if (toTs !== null && event.startTimestamp !== null && event.startTimestamp > toTs) return false;
+        return true;
+      })
+      .sort((a, b) => (a.startTimestamp ?? 0) - (b.startTimestamp ?? 0));
+  };
 
   const selectedEvent = useMemo(
     () => filteredEvents.find((event) => event.id === selectedEventId) ?? filteredEvents[0] ?? null,
@@ -383,26 +530,21 @@ export function HistoryDashboard({ vehicles, googleMapsApiKey }: HistoryDashboar
     return { lat: firstWithCoordinates.lat, lng: firstWithCoordinates.lon };
   }, [filteredEvents, selectedEvent]);
 
-  const pathPoints = useMemo(
-    () => {
-      const drivePoints = filteredEvents
-        .filter((event) => event.kind === "drive" && event.lat !== null && event.lon !== null)
-        .map((event) => ({ lat: event.lat as number, lng: event.lon as number }));
-
-      const pointsToUse =
-        drivePoints.length >= 2
-          ? drivePoints
-          : filteredEvents
-              .filter((event) => event.lat !== null && event.lon !== null)
-              .map((event) => ({ lat: event.lat as number, lng: event.lon as number }));
-
-      return compactRoutePoints(pointsToUse);
-    },
-    [filteredEvents],
-  );
+  const pathPoints = useMemo(() => buildPointsForRoute(filteredEvents), [filteredEvents]);
 
   const driveCount = filteredEvents.filter((event) => event.kind === "drive").length;
   const stopCount = filteredEvents.filter((event) => event.kind === "stop").length;
+  const totalDistanceLabel = useMemo(() => {
+    if (selectedVehicle) {
+      return selectedVehicle.totalDistance ?? "-";
+    }
+
+    const sum = vehicles.reduce((acc, vehicle) => {
+      const km = parseDistanceKilometers(vehicle.totalDistance);
+      return km === null ? acc : acc + km;
+    }, 0);
+    return sum > 0 ? `${sum.toFixed(2)} Kilometer` : "-";
+  }, [selectedVehicle, vehicles]);
 
   useEffect(() => {
     if (!isSwitchingVehicle) {
@@ -415,6 +557,188 @@ export function HistoryDashboard({ vehicles, googleMapsApiKey }: HistoryDashboar
 
     return () => window.clearTimeout(timeoutId);
   }, [isSwitchingVehicle, selectedVehicleId]);
+
+  const requestRouteForChunk = async (chunk: MapPoint[]): Promise<RoutesApiResponse> => {
+    const response = await fetch("/api/routes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ points: chunk }),
+    });
+
+    if (!response.ok) {
+      return {};
+    }
+
+    return (await response.json()) as RoutesApiResponse;
+  };
+
+  const chunkRoutePoints = (points: MapPoint[]): MapPoint[][] => {
+    const chunkSize = 24;
+    const chunks: MapPoint[][] = [];
+
+    for (let index = 0; index < points.length - 1; index += chunkSize - 1) {
+      const chunk = points.slice(index, index + chunkSize);
+      if (chunk.length >= 2) {
+        chunks.push(chunk);
+      }
+      if (index + chunkSize >= points.length) break;
+    }
+    return chunks;
+  };
+
+  const mapImageUrlToDataUrl = async (url: string): Promise<string | null> => {
+    try {
+      const response = await fetch(url);
+      if (!response.ok) return null;
+      const blob = await response.blob();
+
+      return await new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(typeof reader.result === "string" ? reader.result : null);
+        reader.readAsDataURL(blob);
+      });
+    } catch {
+      return null;
+    }
+  };
+
+  const buildStaticMapDataUrl = async (points: MapPoint[]): Promise<string | null> => {
+    const apiKey = googleMapsApiKey.trim();
+    if (!apiKey || points.length < 2) return null;
+
+    const chunks = chunkRoutePoints(points).slice(0, 4);
+    const snappedPoints: MapPoint[] = [];
+    let hasSnappedSegments = false;
+
+    for (let index = 0; index < chunks.length; index += 1) {
+      const payload = await requestRouteForChunk(chunks[index]);
+      if (payload.encodedPolyline) {
+        const decoded = decodePolyline(payload.encodedPolyline);
+        if (decoded.length > 0) {
+          hasSnappedSegments = true;
+          if (snappedPoints.length === 0) {
+            snappedPoints.push(...decoded);
+          } else {
+            snappedPoints.push(...decoded.slice(1));
+          }
+        }
+      }
+    }
+
+    // Para PDF evitamos fallback a lineas rectas: si no hay trazado vial real, no renderizamos mapa.
+    if (!hasSnappedSegments || snappedPoints.length < 2) {
+      return null;
+    }
+
+    const sampledSnapped = compactRoutePoints(snappedPoints).slice(0, 80);
+    if (sampledSnapped.length < 2) {
+      return null;
+    }
+
+    const params = new URLSearchParams();
+    // Static Maps (standard) soporta hasta 640x640 por request.
+    params.set("size", "640x360");
+    params.set("scale", "2");
+    params.set("maptype", "roadmap");
+    params.set("format", "png");
+    params.set("key", apiKey);
+
+    params.append(
+      "path",
+      `weight:4|color:0x101820ff|${sampledSnapped.map((p) => `${p.lat},${p.lng}`).join("|")}`,
+    );
+
+    params.append("markers", `color:green|label:I|${sampledSnapped[0].lat},${sampledSnapped[0].lng}`);
+    const lastPoint = sampledSnapped[sampledSnapped.length - 1];
+    params.append("markers", `color:red|label:F|${lastPoint.lat},${lastPoint.lng}`);
+
+    let staticMapUrl = `https://maps.googleapis.com/maps/api/staticmap?${params.toString()}`;
+
+    // Evita URLs muy largas que pueden provocar 400 en Static Maps.
+    if (staticMapUrl.length > 7800) {
+      const fallbackParams = new URLSearchParams();
+      fallbackParams.set("size", "640x360");
+      fallbackParams.set("scale", "2");
+      fallbackParams.set("maptype", "roadmap");
+      fallbackParams.set("format", "png");
+      fallbackParams.set("key", apiKey);
+      fallbackParams.append(
+        "path",
+        `weight:4|color:0x101820ff|${sampledSnapped.slice(0, 20).map((p) => `${p.lat},${p.lng}`).join("|")}`,
+      );
+      fallbackParams.append("markers", `color:green|label:I|${sampledSnapped[0].lat},${sampledSnapped[0].lng}`);
+      fallbackParams.append("markers", `color:red|label:F|${lastPoint.lat},${lastPoint.lng}`);
+      staticMapUrl = `https://maps.googleapis.com/maps/api/staticmap?${fallbackParams.toString()}`;
+    }
+
+    return mapImageUrlToDataUrl(staticMapUrl);
+  };
+
+  const handleGeneratePdf = async () => {
+    setIsGeneratingPdf(true);
+    setPdfStatusMessage("Generando reporte PDF...");
+
+    try {
+      const { jsPDF } = await import("jspdf");
+      const doc = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4" });
+      const reportVehicles = selectedVehicle ? [selectedVehicle] : vehicles;
+      const rangeStart = `${fromDate || "-"} ${fromTime || "00:00"}`;
+      const rangeEnd = `${toDate || "-"} ${toTime || "23:59"}`;
+
+      for (let vehicleIndex = 0; vehicleIndex < reportVehicles.length; vehicleIndex += 1) {
+        const vehicle = reportVehicles[vehicleIndex];
+        const events = getFilteredEventsForVehicle(vehicle);
+        const reportPathPoints = buildPointsForRoute(events);
+
+        if (vehicleIndex > 0) {
+          doc.addPage();
+        }
+
+        let y = 44;
+        doc.setFontSize(16);
+        doc.text("Reporte de rutas vehiculares", 40, y);
+        y += 24;
+        doc.setFontSize(12);
+        doc.text(`Dispositivo: ${vehicle.name}`, 40, y);
+        y += 18;
+        doc.text(`Rango: ${rangeStart} - ${rangeEnd}`, 40, y);
+        y += 18;
+        doc.text(`Eventos: ${events.length} | Movimientos: ${events.filter((e) => e.kind === "drive").length} | Paradas: ${events.filter((e) => e.kind === "stop").length}`, 40, y);
+        y += 18;
+        doc.text(`Distancia total: ${vehicle.totalDistance ?? "-"}`, 40, y);
+        y += 20;
+
+        const mapImageData = await buildStaticMapDataUrl(reportPathPoints);
+        if (mapImageData) {
+          doc.addImage(mapImageData, "PNG", 40, y, 515, 265);
+          y += 280;
+        } else {
+          doc.setFontSize(10);
+          doc.text("No fue posible generar imagen de mapa para este vehiculo.", 40, y);
+          y += 18;
+        }
+
+        doc.setFontSize(12);
+        doc.text("Eventos (primeros 12):", 40, y);
+        y += 16;
+        doc.setFontSize(9);
+
+        events.slice(0, 12).forEach((event, index) => {
+          const line = `${index + 1}. ${event.kind === "drive" ? "Conducir" : "Detener"} | ${event.startAt} -> ${event.endAt} | ${event.distance}`;
+          doc.text(line, 40, y);
+          y += 14;
+        });
+      }
+
+      const reportName = selectedVehicle ? selectedVehicle.name.replace(/\s+/g, "_") : "todos_los_dispositivos";
+      doc.save(`reporte_rutas_${reportName}.pdf`);
+      setPdfStatusMessage("PDF generado correctamente.");
+    } catch {
+      setPdfStatusMessage("No se pudo generar el PDF. Revisa la configuracion de Google API.");
+    } finally {
+      setIsGeneratingPdf(false);
+    }
+  };
 
   return (
     <div className="history-layout">
@@ -429,9 +753,22 @@ export function HistoryDashboard({ vehicles, googleMapsApiKey }: HistoryDashboar
           <select
             id="vehicle-select"
             className="vehicle-select"
-            value={selectedVehicle?.id ?? ""}
+            value={selectedVehicleId}
             onChange={(event) => {
               const nextVehicleId = event.target.value;
+              if (nextVehicleId === ALL_VEHICLES_ID) {
+                setIsSwitchingVehicle(true);
+                setSelectedVehicleId(ALL_VEHICLES_ID);
+                setSelectedEventId("");
+                const nextFrom = toDateAndTimeParts(overallPeriod.periodStart);
+                const nextTo = toDateAndTimeParts(overallPeriod.periodEnd);
+                setFromDate(nextFrom.date);
+                setFromTime(nextFrom.time);
+                setToDate(nextTo.date);
+                setToTime(nextTo.time);
+                return;
+              }
+
               const nextVehicle = vehicles.find((vehicle) => vehicle.id === nextVehicleId);
               setIsSwitchingVehicle(true);
               setSelectedVehicleId(nextVehicleId);
@@ -444,6 +781,7 @@ export function HistoryDashboard({ vehicles, googleMapsApiKey }: HistoryDashboar
               setToTime(nextTo.time);
             }}
           >
+            <option value={ALL_VEHICLES_ID}>Todos los dispositivos</option>
             {vehicles.map((vehicle) => (
               <option key={vehicle.id} value={vehicle.id}>
                 {vehicle.name}
@@ -478,6 +816,35 @@ export function HistoryDashboard({ vehicles, googleMapsApiKey }: HistoryDashboar
           <input id="to-time" type="time" value={toTime} onChange={(event) => setToTime(event.target.value)} />
         </div>
 
+        <div className="panel-block filters-block">
+          <label htmlFor="address-search">Buscar direccion:</label>
+          <input
+            id="address-search"
+            type="text"
+            placeholder="Ej: Av. Santa Rosa 1234, La Pintana"
+            value={addressInput}
+            onChange={(event) => setAddressInput(event.target.value)}
+          />
+          <button
+            type="button"
+            className="address-search-button"
+            onClick={() => {
+              const trimmed = addressInput.trim();
+              if (!trimmed) {
+                setAddressSearchStatus({ status: "not_found", message: "Escribe una direccion para buscar." });
+                return;
+              }
+
+              setAddressLookup({ query: trimmed, token: Date.now() });
+            }}
+          >
+            Centrar en direccion
+          </button>
+          {addressSearchStatus.status !== "idle" ? (
+            <p className={`address-search-status ${addressSearchStatus.status}`}>{addressSearchStatus.message}</p>
+          ) : null}
+        </div>
+
         <div className="panel-block summary-grid">
           <div>
             <span>Total eventos</span>
@@ -493,13 +860,13 @@ export function HistoryDashboard({ vehicles, googleMapsApiKey }: HistoryDashboar
           </div>
           <div>
             <span>Distancia total</span>
-            <strong>{selectedVehicle?.totalDistance ?? "-"}</strong>
+            <strong>{totalDistanceLabel}</strong>
           </div>
         </div>
 
         <div className="panel-block period-block">
-          <span>Desde: {selectedVehicle?.periodStart ?? "-"}</span>
-          <span>Hasta: {selectedVehicle?.periodEnd ?? "-"}</span>
+          <span>Desde: {(selectedVehicle?.periodStart ?? overallPeriod.periodStart) ?? "-"}</span>
+          <span>Hasta: {(selectedVehicle?.periodEnd ?? overallPeriod.periodEnd) ?? "-"}</span>
         </div>
 
         {selectedVehicle?.error ? <p className="vehicle-error">{selectedVehicle.error}</p> : null}
@@ -527,6 +894,7 @@ export function HistoryDashboard({ vehicles, googleMapsApiKey }: HistoryDashboar
                     {event.index}. {event.kind === "drive" ? "Conducir" : "Detener"}
                   </strong>
                 </div>
+                {!selectedVehicle ? <p className="event-vehicle-tag">{event.vehicleName}</p> : null}
                 <p>{event.startAt}</p>
                 <p>{event.endAt}</p>
                 <div className="event-metrics">
@@ -544,17 +912,23 @@ export function HistoryDashboard({ vehicles, googleMapsApiKey }: HistoryDashboar
       <section className="history-map-panel">
         <div className="map-toolbar">
           <div>
-            <h2>{selectedVehicle?.name ?? "Sin vehiculo"}</h2>
+            <h2>{selectedVehicle?.name ?? "Todos los dispositivos"}</h2>
             <p>
               Velocidad maxima: {selectedVehicle?.maxSpeed ?? "-"} | Velocidad media: {selectedVehicle?.avgSpeed ?? "-"}
             </p>
           </div>
-          {selectedEvent?.googleMapsUrl ? (
-            <a href={selectedEvent.googleMapsUrl} target="_blank" rel="noreferrer">
-              Abrir en Google Maps
-            </a>
-          ) : null}
+          <div className="toolbar-actions">
+            <button type="button" className="report-button" onClick={handleGeneratePdf} disabled={isGeneratingPdf}>
+              {isGeneratingPdf ? "Generando PDF..." : "Generar PDF"}
+            </button>
+            {selectedEvent?.googleMapsUrl ? (
+              <a href={selectedEvent.googleMapsUrl} target="_blank" rel="noreferrer">
+                Abrir en Google Maps
+              </a>
+            ) : null}
+          </div>
         </div>
+        {pdfStatusMessage ? <p className="pdf-status">{pdfStatusMessage}</p> : null}
 
         {isSwitchingVehicle ? (
           <div className="map-frame">
@@ -563,7 +937,13 @@ export function HistoryDashboard({ vehicles, googleMapsApiKey }: HistoryDashboar
             </div>
           </div>
         ) : (
-          <VehicleMap apiKey={googleMapsApiKey} center={centerPoint} pathPoints={pathPoints} />
+          <VehicleMap
+            apiKey={googleMapsApiKey}
+            center={centerPoint}
+            pathPoints={pathPoints}
+            addressLookup={addressLookup}
+            onAddressSearchStatusChange={setAddressSearchStatus}
+          />
         )}
 
         {selectedEvent ? (
@@ -571,6 +951,9 @@ export function HistoryDashboard({ vehicles, googleMapsApiKey }: HistoryDashboar
             <h3>Detalle del evento seleccionado</h3>
             <p>
               <strong>Estado:</strong> {selectedEvent.status}
+            </p>
+            <p>
+              <strong>Vehiculo:</strong> {selectedEvent.vehicleName}
             </p>
             <p>
               <strong>Inicio:</strong> {selectedEvent.startAt}

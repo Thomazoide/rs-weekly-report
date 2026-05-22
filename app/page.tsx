@@ -75,6 +75,8 @@ async function getVehicleHistories(): Promise<VehicleHistory[]> {
 
         return {
           id: `${fileName}-${index}`,
+          vehicleId: fileName.replace(".json", ""),
+          vehicleName,
           index: index + 1,
           kind: eventKind,
           status: row.status ?? (eventKind === "drive" ? "En movimiento" : "Detenido"),

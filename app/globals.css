@@ -39,7 +39,7 @@ body {
   padding: 1rem;
   min-height: 100vh;
   height: 100vh;
-  overflow: hidden;
+  overflow-y: auto;
 }
 
 .sidebar-header h1 {
@@ -121,13 +121,37 @@ body {
 }
 
 .events-list {
-  overflow-y: auto;
-  min-height: 0;
-  flex: 1;
   display: flex;
   flex-direction: column;
   gap: 0.65rem;
   padding-right: 0.2rem;
+}
+
+.address-search-button {
+  border: none;
+  border-radius: 10px;
+  background: #0e7ba3;
+  color: #fff;
+  padding: 0.55rem 0.75rem;
+  font-size: 0.86rem;
+  font-weight: 600;
+}
+
+.address-search-status {
+  font-size: 0.82rem;
+}
+
+.address-search-status.found {
+  color: #1a6d44;
+}
+
+.address-search-status.searching {
+  color: #2b5f8b;
+}
+
+.address-search-status.not_found,
+.address-search-status.error {
+  color: #a22b2b;
 }
 
 .event-card {
@@ -173,6 +197,14 @@ body {
   font-size: 0.82rem;
   color: #3d4b61;
   line-height: 1.35;
+}
+
+.event-vehicle-tag {
+  display: inline-block;
+  margin-bottom: 0.25rem;
+  color: #0e7ba3 !important;
+  font-size: 0.78rem !important;
+  font-weight: 700;
 }
 
 .event-metrics {
@@ -258,6 +290,35 @@ body {
   padding: 0.55rem 0.9rem;
   font-size: 0.85rem;
   white-space: nowrap;
+}
+
+.toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.report-button {
+  border: none;
+  border-radius: 999px;
+  background: #1a6d44;
+  color: #fff;
+  padding: 0.55rem 0.9rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.report-button:disabled {
+  opacity: 0.65;
+}
+
+.pdf-status {
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid var(--border);
+  background: #f3f8f4;
+  color: #294f39;
+  font-size: 0.85rem;
 }
 
 .map-frame {
