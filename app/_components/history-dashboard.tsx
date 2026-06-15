@@ -313,39 +313,78 @@ function VehicleMap({
     onAddressSearchStatusChange({ status: "searching", message: "Buscando direccion..." });
 
     const geocoder = new window.google.maps.Geocoder();
-    geocoder.geocode({ address: addressLookup.query }, (results, status) => {
-      if (cancelled) return;
-
-      if (status === "OK" && results?.[0]?.geometry?.location) {
-        const location = results[0].geometry.location;
-        const point = { lat: location.lat(), lng: location.lng() };
-        setSearchedPoint(point);
-        mapRef.current?.panTo(point);
-        mapRef.current?.setZoom(16);
-        onAddressSearchStatusChange({
-          status: "found",
-          message: results[0].formatted_address ?? "Direccion encontrada.",
-        });
-        return;
-      }
-
-      if (status === "ZERO_RESULTS") {
+    const doGeocode = ( request: google.maps.GeocoderRequest ) => new Promise<google.maps.GeocoderResult[]>( (resolve, reject) => {
+      geocoder.geocode(request, (results, status) => {
+        if(status === "OK") {
+          resolve(results ?? [])
+        }else if(status === "ZERO_RESULTS") {
+          resolve([])
+        }else{
+          reject(status)
+        }
+      } )
+    } )
+    const run = async () => {
+      const attemps: google.maps.GeocoderRequest[] = [
+        {
+          address: addressLookup.query,
+          componentRestrictions: {
+            locality: "Puente Alto",
+            country: "CL"
+          }
+        },
+        {
+          address: addressLookup.query,
+          componentRestrictions: {
+            country: "CL"
+          }
+        },
+        {
+          address: addressLookup.query,
+          region: "cl"
+        }
+      ]
+      let results: google.maps.GeocoderResult[] = []
+      try{
+        for (const req of attemps) {
+          if (cancelled) return;
+          const res = await doGeocode(req)
+          if(res.length) {
+            results = res
+            break
+          }
+        }
+        if(cancelled) return;
+        if(results.length && results[0].geometry?.location) {
+          const location = results[0].geometry.location;
+          const point = {
+            lat: location.lat(),
+            lng: location.lng()
+          }
+          setSearchedPoint(point)
+          mapRef.current?.panTo(point)
+          mapRef.current?.setZoom(16)
+          onAddressSearchStatusChange({
+            status: "found",
+            message: results[0].formatted_address ?? "Dirección encontrada"
+          })
+          return;
+        }
         onAddressSearchStatusChange({
           status: "not_found",
-          message: "No se encontro esa direccion.",
-        });
-        return;
+          message: "No se encontró la dirección deseada..."
+        })
+      } catch(e) {
+        onAddressSearchStatusChange({
+          status: "error",
+          message: (e instanceof Error ? e.message : "Error de geocodificación")
+        })
       }
-
-      onAddressSearchStatusChange({
-        status: "error",
-        message: `Error de geocodificacion: ${status}`,
-      });
-    });
-
+    }
+    void run()
     return () => {
-      cancelled = true;
-    };
+      cancelled = true
+    }
   }, [addressLookup, isLoaded, onAddressSearchStatusChange]);
 
   useEffect(() => {
@@ -414,11 +453,11 @@ function VehicleMap({
             <MarkerF
               position={searchedPoint}
               icon={{
-                path: window.google.maps.SymbolPath.CIRCLE,
+                path: window.google.maps.SymbolPath.BACKWARD_CLOSED_ARROW,
                 scale: 7,
                 fillColor: "#1e88b0",
                 fillOpacity: 1,
-                strokeColor: "#ffffff",
+                strokeColor: "black",
                 strokeWeight: 2,
               }}
             />
@@ -427,7 +466,7 @@ function VehicleMap({
             <PolylineF
               path={visiblePath}
               options={{
-                strokeColor: "#101820",
+                strokeColor: "#D63313",
                 strokeOpacity: 0.9,
                 strokeWeight: 3,
               }}
